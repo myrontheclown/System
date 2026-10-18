@@ -1,0 +1,6 @@
+{
+  "name": "SYSTEM - RPG Progression Protocol",
+  "description": "An autonomous RPG progression interface turning real-world goals, discipline, and daily quests into empirical character growth.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
