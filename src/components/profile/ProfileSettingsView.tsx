@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import { downloadBackupFile, parseBackupJson, SystemBackupPayload } from '../../utils/backup';
 import { useSystem } from '../../context/SystemContext';
 import {
   Edit2,
@@ -18,6 +19,7 @@ import {
   RotateCcw,
   Sparkles,
   X,
+  Upload,
 } from 'lucide-react';
 
 export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> = ({
@@ -34,6 +36,8 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
     updateProfileName,
     resetProgress,
     loadShowcaseState,
+    exportBackup,
+    restoreBackup,
   } = useSystem();
 
   const [showEditNameModal, setShowEditNameModal] = useState(false);
@@ -41,11 +45,17 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
   const [showPurgeModal, setShowPurgeModal] = useState(false);
   const [showAddGoalModal, setShowAddGoalModal] = useState(false);
   const [customGoalName, setCustomGoalName] = useState('');
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [showRestoreModal, setShowRestoreModal] = useState(false);
+  const [pendingRestore, setPendingRestore] = useState<SystemBackupPayload | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 2500);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
+
+  const showToast = (msg: string, type: 'success' | 'error' | 'info' = 'info') => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToast({ message: msg, type });
+    toastTimeoutRef.current = window.setTimeout(() => setToast(null), type === 'error' ? 4500 : 2500);
   };
 
   const allAvailableGoals = [
@@ -131,23 +141,89 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
     showToast(`Cycle reset scheduled for ${nextTime}`);
   };
 
-  const handleExportData = () => {
-    const backupData = {
-      profile,
-      quests,
-      achievements,
-      exportTimestamp: new Date().toISOString(),
-      architectureVersion: '2.4.0-Optimal',
+  const handleExportBackup = () => {
+    try {
+      const result = exportBackup();
+      if (!result.success || !result.data) {
+        showToast(result.error || 'Failed to generate backup payload.', 'error');
+        return;
+      }
+      downloadBackupFile(result.data);
+      showToast('System backup exported successfully.', 'success');
+    } catch (err) {
+      showToast(`Export error: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    }
+  };
+
+  const handleTriggerFilePicker = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!file.name.endsWith('.json') && file.type && file.type !== 'application/json') {
+      showToast('Invalid file format: Please select a valid JSON backup file.', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result;
+        if (typeof content !== 'string') {
+          showToast('Failed to read file contents.', 'error');
+          return;
+        }
+
+        const result = parseBackupJson(content);
+        if (!result.valid || !result.data) {
+          showToast(result.error || 'Validation failed: Invalid backup file.', 'error');
+          return;
+        }
+
+        // Store validated data and present overwrite confirmation modal
+        setPendingRestore(result.data);
+        setShowRestoreModal(true);
+      } catch (err) {
+        showToast(`Error processing backup: ${err instanceof Error ? err.message : 'Corrupted file'}`, 'error');
+      }
     };
-    const jsonStr = JSON.stringify(backupData, null, 2);
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `system_telemetry_${profile.name.toLowerCase()}_${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Telemetry payload downloaded');
+
+    reader.onerror = () => {
+      showToast('Error reading the selected file from disk.', 'error');
+    };
+
+    reader.readAsText(file);
+  };
+
+  const handleConfirmRestore = () => {
+    if (!pendingRestore) return;
+    try {
+      const result = restoreBackup(pendingRestore);
+      setShowRestoreModal(false);
+      setPendingRestore(null);
+
+      if (result.success) {
+        showToast('System backup restored successfully.', 'success');
+      } else {
+        showToast(result.error || 'Failed to restore backup.', 'error');
+      }
+    } catch (err) {
+      setShowRestoreModal(false);
+      setPendingRestore(null);
+      showToast(`Restoration failed: ${err instanceof Error ? err.message : 'Storage error'}. Data preserved.`, 'error');
+    }
+  };
+
+  const handleCancelRestore = () => {
+    setShowRestoreModal(false);
+    setPendingRestore(null);
   };
 
   const handleConfirmPurge = () => {
@@ -164,10 +240,28 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
   return (
     <div className="flex flex-col w-full pb-10 space-y-6 select-none animate-fadeIn">
       {/* Toast popup */}
-      {toastMessage && (
-        <div className="fixed top-18 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg bg-[#0D0E14] border border-[#4D8DFF] text-xs font-mono font-bold text-[#F5F5F7] shadow-2xl z-50 flex items-center gap-2 animate-bounce">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#4D8DFF] shadow-[0_0_8px_#4D8DFF]" />
-          <span>{toastMessage}</span>
+      {toast && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className={`fixed top-18 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-lg bg-[#0D0E14] max-w-[90vw] text-xs font-mono font-bold shadow-2xl z-50 flex items-center gap-2 animate-bounce ${
+            toast.type === 'error'
+              ? 'border border-[#FF5263] text-[#FF5263]'
+              : toast.type === 'success'
+              ? 'border border-[#3DDB8B] text-[#F5F5F7]'
+              : 'border border-[#4D8DFF] text-[#F5F5F7]'
+          }`}
+        >
+          <span
+            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+              toast.type === 'error'
+                ? 'bg-[#FF5263] shadow-[0_0_8px_#FF5263]'
+                : toast.type === 'success'
+                ? 'bg-[#3DDB8B] shadow-[0_0_8px_#3DDB8B]'
+                : 'bg-[#4D8DFF] shadow-[0_0_8px_#4D8DFF]'
+            }`}
+          />
+          <span className="truncate">{toast.message}</span>
         </div>
       )}
 
@@ -687,10 +781,20 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
             </span>
           </div>
 
-          {/* Export Data */}
+          {/* Hidden File Input for Restore */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleFileSelected}
+            className="hidden"
+            aria-label="Upload JSON backup file"
+          />
+
+          {/* Export Backup */}
           <button
             type="button"
-            onClick={handleExportData}
+            onClick={handleExportBackup}
             className="w-full flex items-center justify-between p-3 text-left hover:bg-[#1b1b20] transition-colors rounded-lg group"
           >
             <div className="flex items-center gap-3">
@@ -699,15 +803,39 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
               </span>
               <div>
                 <span className="text-xs text-[#F5F5F7] font-semibold block">
-                  Export Telemetry Data
+                  Export System Backup
                 </span>
                 <span className="text-[11px] text-[#9290A0]">
-                  JSON packet of all logs, stats & quests
+                  Download JSON snapshot of profile, quests & achievements
                 </span>
               </div>
             </div>
             <span className="text-[10px] font-bold text-[#4D8DFF] font-mono">
-              JSON / CSV &gt;
+              EXPORT &gt;
+            </span>
+          </button>
+
+          {/* Restore Backup */}
+          <button
+            type="button"
+            onClick={handleTriggerFilePicker}
+            className="w-full flex items-center justify-between p-3 text-left hover:bg-[#1b1b20] transition-colors rounded-lg group"
+          >
+            <div className="flex items-center gap-3">
+              <span className="material-symbols-outlined text-[#9290A0] text-[20px] group-hover:text-white transition-colors">
+                upload_file
+              </span>
+              <div>
+                <span className="text-xs text-[#F5F5F7] font-semibold block">
+                  Restore System Backup
+                </span>
+                <span className="text-[11px] text-[#9290A0]">
+                  Import previous JSON backup to restore progress
+                </span>
+              </div>
+            </div>
+            <span className="text-[10px] font-bold text-[#B45CFF] font-mono">
+              RESTORE &gt;
             </span>
           </button>
 
@@ -886,6 +1014,79 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
                 className="flex-1 h-10 rounded-lg bg-[#FF5263] text-[#07070B] text-xs font-bold uppercase tracking-wider hover:opacity-90 shadow-[0_0_12px_rgba(255,82,99,0.4)]"
               >
                 CONFIRM PURGE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRMATION RESTORE MODAL */}
+      {showRestoreModal && pendingRestore && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#07070B]/85 backdrop-blur-md">
+          <div className="bg-[#14151D] border border-[#8B3DFF]/50 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl animate-scaleUp">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-[#8B3DFF]/20 flex items-center justify-center text-[#B45CFF]">
+                <Upload className="w-5 h-5 text-[#B45CFF]" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[#F5F5F7]">
+                  RESTORE BACKUP?
+                </h3>
+                <span className="text-[10px] text-[#B45CFF] uppercase font-bold tracking-wider">
+                  OVERWRITE CONFIRMATION
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs text-[#9290A0] leading-relaxed">
+              This action will overwrite your current profile, quests, and achievements with the data from the selected backup file.
+            </p>
+
+            {/* Backup Snapshot Details */}
+            <div className="bg-[#0D0E14] border border-[#29233A] rounded-xl p-3 space-y-1.5 text-xs">
+              <div className="flex justify-between items-center text-[#9290A0]">
+                <span>Operator Ident:</span>
+                <span className="font-bold text-white uppercase">{pendingRestore.profile.name}</span>
+              </div>
+              <div className="flex justify-between items-center text-[#9290A0]">
+                <span>Rank & Level:</span>
+                <span className="font-mono text-[#4D8DFF]">
+                  LVL {pendingRestore.profile.level} · RANK {pendingRestore.profile.rank}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-[#9290A0]">
+                <span>Quests / Badges:</span>
+                <span className="font-mono text-[#F5F5F7]">
+                  {pendingRestore.quests.length} quests · {pendingRestore.achievements.length} achievements
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-[#9290A0]">
+                <span>Exported:</span>
+                <span className="font-mono text-[10px] text-[#9290A0]">
+                  {new Date(pendingRestore.exportTimestamp).toLocaleString()}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-[#FF5263]/10 border border-[#FF5263]/30 text-[11px] text-[#FF5263] flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>Unsaved current progress will be replaced permanently.</span>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleCancelRestore}
+                className="flex-1 h-10 rounded-lg bg-[#1f1f24] hover:bg-[#2a292e] text-[#F5F5F7] text-xs font-bold uppercase transition-colors"
+              >
+                ABORT
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRestore}
+                className="flex-1 h-10 rounded-lg bg-[#8B3DFF] text-white text-xs font-bold uppercase tracking-wider hover:opacity-90 shadow-[0_0_12px_rgba(139,61,255,0.4)]"
+              >
+                CONFIRM RESTORE
               </button>
             </div>
           </div>

@@ -22,6 +22,14 @@ import {
   triggerBossConfetti,
   triggerSystemConfetti,
 } from '../game/progression';
+import {
+  STORAGE_KEYS,
+  SystemBackupPayload,
+  createBackupPayload,
+  validateBackup,
+} from '../utils/backup';
+
+export { STORAGE_KEYS };
 
 interface SystemContextType {
   profile: PlayerProfile;
@@ -60,6 +68,10 @@ interface SystemContextType {
   loadShowcaseState: () => void;
   loadFreshState: () => void;
 
+  // Backup & Restore
+  exportBackup: () => { success: boolean; data?: SystemBackupPayload; warnings?: string[]; error?: string };
+  restoreBackup: (backupPayload: SystemBackupPayload) => { success: boolean; error?: string };
+
   // Onboarding
   completeOnboarding: (data: {
     name: string;
@@ -70,11 +82,6 @@ interface SystemContextType {
   }) => void;
 }
 
-const STORAGE_KEYS = {
-  PROFILE: 'system_player_profile_v1',
-  QUESTS: 'system_player_quests_v1',
-  ACHIEVEMENTS: 'system_player_achievements_v1',
-};
 
 const SystemContext = createContext<SystemContextType | undefined>(undefined);
 
@@ -589,6 +596,88 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     resetProgress();
   };
 
+  // Backup & Restore handlers
+  const exportBackup = () => {
+    try {
+      const { payload, warnings } = createBackupPayload(profile, quests, achievements);
+      SoundFX.playClick(profile.appearance.soundEffects);
+      return { success: true, data: payload, warnings };
+    } catch (err) {
+      return {
+        success: false,
+        error: `Export failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  };
+
+  const restoreBackup = (backupPayload: SystemBackupPayload): { success: boolean; error?: string } => {
+    // 1. Validation check
+    const validation = validateBackup(backupPayload);
+    if (!validation.valid || !validation.data) {
+      return {
+        success: false,
+        error: validation.error || 'Backup validation failed.',
+      };
+    }
+
+    const validData = validation.data;
+
+    // 2. Snapshot current localStorage before any modifications
+    const snapshot = {
+      profile: localStorage.getItem(STORAGE_KEYS.PROFILE),
+      quests: localStorage.getItem(STORAGE_KEYS.QUESTS),
+      achievements: localStorage.getItem(STORAGE_KEYS.ACHIEVEMENTS),
+    };
+
+    try {
+      // 3. Serialize and write to localStorage
+      const profileStr = JSON.stringify(validData.profile);
+      const questsStr = JSON.stringify(validData.quests);
+      const achievementsStr = JSON.stringify(validData.achievements);
+
+      localStorage.setItem(STORAGE_KEYS.PROFILE, profileStr);
+      localStorage.setItem(STORAGE_KEYS.QUESTS, questsStr);
+      localStorage.setItem(STORAGE_KEYS.ACHIEVEMENTS, achievementsStr);
+
+      // 4. Update React Context state immediately
+      setProfile(validData.profile);
+      setQuests(validData.quests);
+      setAchievements(validData.achievements);
+      setSelectedQuestId(null);
+
+      // Audio cue matching app visual identity
+      SoundFX.playLevelUp(validData.profile.appearance.soundEffects);
+
+      return { success: true };
+    } catch (storageError) {
+      // Rollback to snapshot if writing to localStorage threw an error
+      try {
+        if (snapshot.profile !== null) {
+          localStorage.setItem(STORAGE_KEYS.PROFILE, snapshot.profile);
+        } else {
+          localStorage.removeItem(STORAGE_KEYS.PROFILE);
+        }
+        if (snapshot.quests !== null) {
+          localStorage.setItem(STORAGE_KEYS.QUESTS, snapshot.quests);
+        } else {
+          localStorage.removeItem(STORAGE_KEYS.QUESTS);
+        }
+        if (snapshot.achievements !== null) {
+          localStorage.setItem(STORAGE_KEYS.ACHIEVEMENTS, snapshot.achievements);
+        } else {
+          localStorage.removeItem(STORAGE_KEYS.ACHIEVEMENTS);
+        }
+      } catch (rollbackErr) {
+        console.error('Critical: Failed to rollback storage state', rollbackErr);
+      }
+
+      return {
+        success: false,
+        error: `Restore failed: ${storageError instanceof Error ? storageError.message : 'Storage write failure'}. Current data was preserved.`,
+      };
+    }
+  };
+
   // Onboarding completion
   const completeOnboarding = (data: {
     name: string;
@@ -649,6 +738,8 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         resetProgress,
         loadShowcaseState,
         loadFreshState,
+        exportBackup,
+        restoreBackup,
         completeOnboarding,
       }}
     >
