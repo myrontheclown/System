@@ -79,6 +79,65 @@ export function getResonanceMultiplier(streakDays: number): number {
   return Number(multiplier.toFixed(2));
 }
 
+export interface XpProgressionResult {
+  level: number;
+  currentXp: number;
+  xpToNextLevel: number;
+  rank: RankTier;
+  unallocatedPoints: number;
+  totalXp: number;
+  didLevelUp: boolean;
+  didRankUp: boolean;
+  levelsGained: number;
+}
+
+/**
+ * Calculates XP and level progression when XP is gained.
+ * Supports crossing multiple level thresholds in a single action,
+ * preserving exact level-to-level XP curves and rank thresholds.
+ */
+export function calculateXpProgression(
+  currentLevel: number,
+  currentXp: number,
+  xpToNextLevel: number,
+  currentRank: RankTier,
+  currentUnallocatedPoints: number,
+  currentTotalXp: number,
+  gainedXp: number
+): XpProgressionResult {
+  const safeGainedXp = Math.max(0, Math.round(gainedXp));
+  let level = currentLevel;
+  let xp = currentXp + safeGainedXp;
+  let totalXp = currentTotalXp + safeGainedXp;
+  let threshold = xpToNextLevel > 0 ? xpToNextLevel : getRequiredXpForLevel(level);
+  let unallocatedPoints = currentUnallocatedPoints;
+  let levelsGained = 0;
+
+  while (xp >= threshold && threshold > 0) {
+    levelsGained++;
+    level += 1;
+    xp -= threshold;
+    unallocatedPoints += 1;
+    threshold = getRequiredXpForLevel(level);
+  }
+
+  const rank = getRankForLevel(level);
+  const didLevelUp = levelsGained > 0;
+  const didRankUp = rank !== currentRank;
+
+  return {
+    level,
+    currentXp: xp,
+    xpToNextLevel: threshold,
+    rank,
+    unallocatedPoints,
+    totalXp,
+    didLevelUp,
+    didRankUp,
+    levelsGained,
+  };
+}
+
 // Web Audio API Sci-Fi Sound Synthesizer
 let audioCtx: AudioContext | null = null;
 

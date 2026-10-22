@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import {
   Achievement,
   AttributeKey,
@@ -15,6 +15,7 @@ import {
   INITIAL_QUESTS,
 } from '../game/initialData';
 import {
+  calculateXpProgression,
   getRankForLevel,
   getRequiredXpForLevel,
   getResonanceMultiplier,
@@ -117,6 +118,13 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return INITIAL_ACHIEVEMENTS;
   });
 
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
+  const questsRef = useRef(quests);
+  questsRef.current = quests;
+  const achievementsRef = useRef(achievements);
+  achievementsRef.current = achievements;
+
   const [currentTab, setCurrentTab] = useState<NavigationTab>('system');
   const [selectedQuestId, setSelectedQuestId] = useState<string | null>(null);
   const [systemEvent, setSystemEvent] = useState<SystemEventState>({ type: null });
@@ -180,171 +188,141 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Toggle objective in a quest
   const toggleObjective = (questId: string, objectiveId: string) => {
-    SoundFX.playToggle(profile.appearance.soundEffects);
-    setQuests((prevQuests) =>
-      prevQuests.map((q) => {
-        if (q.id !== questId) return q;
-        const updatedObjectives = q.objectives.map((obj) => {
-          if (obj.id !== objectiveId) return obj;
-          const nextCompleted = !obj.completed;
-          return {
-            ...obj,
-            completed: nextCompleted,
-            current: nextCompleted ? obj.target : 0,
-          };
-        });
+    const targetQuest = questsRef.current.find((q) => q.id === questId);
+    if (!targetQuest || targetQuest.status === 'completed' || targetQuest.status === 'failed') return;
 
-        // If all objectives completed, set status to active/ready
+    SoundFX.playToggle(profileRef.current.appearance.soundEffects);
+    questsRef.current = questsRef.current.map((q) => {
+      if (q.id !== questId) return q;
+      const updatedObjectives = q.objectives.map((obj) => {
+        if (obj.id !== objectiveId) return obj;
+        const nextCompleted = !obj.completed;
         return {
-          ...q,
-          objectives: updatedObjectives,
+          ...obj,
+          completed: nextCompleted,
+          current: nextCompleted ? obj.target : 0,
         };
-      })
-    );
+      });
+
+      return {
+        ...q,
+        objectives: updatedObjectives,
+      };
+    });
+    setQuests(questsRef.current);
   };
 
   const startQuest = (questId: string) => {
-    SoundFX.playClick(profile.appearance.soundEffects);
-    setQuests((prev) =>
-      prev.map((q) => (q.id === questId ? { ...q, status: 'active' } : q))
-    );
+    const targetQuest = questsRef.current.find((q) => q.id === questId);
+    if (!targetQuest || targetQuest.status === 'completed' || targetQuest.status === 'failed') return;
+
+    SoundFX.playClick(profileRef.current.appearance.soundEffects);
+    questsRef.current = questsRef.current.map((q) => (q.id === questId ? { ...q, status: 'active' } : q));
+    setQuests(questsRef.current);
   };
 
   // Complete a quest and trigger rewards/level up
   const completeQuest = (questId: string) => {
-    const targetQuest = quests.find((q) => q.id === questId);
-    if (!targetQuest || targetQuest.status === 'completed') return;
+    const targetQuest = questsRef.current.find((q) => q.id === questId);
+    if (!targetQuest || targetQuest.status === 'completed' || targetQuest.status === 'failed') return;
 
     if (targetQuest.isBoss) {
       claimBossVictory(questId);
       return;
     }
 
-    // Mark all objectives completed
+    // Mark all objectives completed and quest completed
     const updatedObjectives = targetQuest.objectives.map((o) => ({
       ...o,
       completed: true,
       current: o.target,
     }));
 
-    setQuests((prev) =>
-      prev.map((q) =>
-        q.id === questId
-          ? { ...q, status: 'completed', objectives: updatedObjectives }
-          : q
-      )
+    questsRef.current = questsRef.current.map((q) =>
+      q.id === questId
+        ? { ...q, status: 'completed', objectives: updatedObjectives }
+        : q
+    );
+    setQuests(questsRef.current);
+
+    // Apply XP with Resonance multiplier and calculate multi-level progression
+    const gainedXp = Math.round(targetQuest.xpReward * profileRef.current.resonanceMultiplier);
+    const progression = calculateXpProgression(
+      profileRef.current.level,
+      profileRef.current.currentXp,
+      profileRef.current.xpToNextLevel,
+      profileRef.current.rank,
+      profileRef.current.unallocatedPoints,
+      profileRef.current.totalXp,
+      gainedXp
     );
 
-    // Apply XP with Resonance multiplier
-    const gainedXp = Math.round(targetQuest.xpReward * profile.resonanceMultiplier);
-    let newCurrentXp = profile.currentXp + gainedXp;
-    const newTotalXp = profile.totalXp + gainedXp;
-    let newLevel = profile.level;
-    let newRank = profile.rank;
-    let newUnallocatedPoints = profile.unallocatedPoints;
-    let didLevelUp = false;
-    let didRankUp = false;
-
-    // Check level up threshold
-    if (newCurrentXp >= profile.xpToNextLevel) {
-      didLevelUp = true;
-      newLevel += 1;
-      newCurrentXp -= profile.xpToNextLevel;
-      const nextTargetXp = getRequiredXpForLevel(newLevel);
-      const calculatedRank = getRankForLevel(newLevel);
-      if (calculatedRank !== profile.rank) {
-        didRankUp = true;
-        newRank = calculatedRank;
-      }
-      newUnallocatedPoints += 1;
-
-      // Update XP target
-      setProfile((prev) => {
-        const nextAttrs = { ...prev.attributes };
-        if (targetQuest.statRewards) {
-          (Object.keys(targetQuest.statRewards) as AttributeKey[]).forEach((key) => {
-            const reward = targetQuest.statRewards?.[key] || 0;
-            nextAttrs[key] = (nextAttrs[key] || 10) + reward;
-          });
-        }
-        return {
-          ...prev,
-          level: newLevel,
-          rank: newRank,
-          currentXp: newCurrentXp,
-          xpToNextLevel: nextTargetXp,
-          totalXp: newTotalXp,
-          attributes: nextAttrs,
-          unallocatedPoints: newUnallocatedPoints,
-          totalQuestsCompleted: prev.totalQuestsCompleted + 1,
-        };
+    const nextAttrs = { ...profileRef.current.attributes };
+    if (targetQuest.statRewards) {
+      (Object.keys(targetQuest.statRewards) as AttributeKey[]).forEach((key) => {
+        const reward = targetQuest.statRewards?.[key] || 0;
+        nextAttrs[key] = (nextAttrs[key] || 10) + reward;
       });
-
-      if (didRankUp) {
-        SoundFX.playRankUp(profile.appearance.soundEffects);
-        triggerSystemConfetti();
-        setSystemEvent({
-          type: 'RANK_UP',
-          levelReached: newLevel,
-          newRank: newRank,
-          quest: targetQuest,
-        });
-      } else {
-        SoundFX.playLevelUp(profile.appearance.soundEffects);
-        triggerSystemConfetti();
-        setSystemEvent({
-          type: 'LEVEL_UP',
-          levelReached: newLevel,
-          newRank: newRank,
-          quest: targetQuest,
-        });
-      }
-      return;
     }
 
-    // Normal quest completion without level up
-    setProfile((prev) => {
-      const nextAttrs = { ...prev.attributes };
-      if (targetQuest.statRewards) {
-        (Object.keys(targetQuest.statRewards) as AttributeKey[]).forEach((key) => {
-          const reward = targetQuest.statRewards?.[key] || 0;
-          nextAttrs[key] = (nextAttrs[key] || 10) + reward;
-        });
-      }
-      return {
-        ...prev,
-        currentXp: newCurrentXp,
-        totalXp: newTotalXp,
-        attributes: nextAttrs,
-        totalQuestsCompleted: prev.totalQuestsCompleted + 1,
-      };
-    });
+    profileRef.current = {
+      ...profileRef.current,
+      level: progression.level,
+      rank: progression.rank,
+      currentXp: progression.currentXp,
+      xpToNextLevel: progression.xpToNextLevel,
+      totalXp: progression.totalXp,
+      attributes: nextAttrs,
+      unallocatedPoints: progression.unallocatedPoints,
+      totalQuestsCompleted: profileRef.current.totalQuestsCompleted + 1,
+    };
+    setProfile(profileRef.current);
 
-    SoundFX.playQuestComplete(profile.appearance.soundEffects);
-    triggerSystemConfetti();
-    setSystemEvent({
-      type: 'QUEST_COMPLETE',
-      quest: targetQuest,
-    });
+    if (progression.didRankUp) {
+      SoundFX.playRankUp(profileRef.current.appearance.soundEffects);
+      triggerSystemConfetti();
+      setSystemEvent({
+        type: 'RANK_UP',
+        levelReached: progression.level,
+        newRank: progression.rank,
+        quest: targetQuest,
+      });
+    } else if (progression.didLevelUp) {
+      SoundFX.playLevelUp(profileRef.current.appearance.soundEffects);
+      triggerSystemConfetti();
+      setSystemEvent({
+        type: 'LEVEL_UP',
+        levelReached: progression.level,
+        newRank: progression.rank,
+        quest: targetQuest,
+      });
+    } else {
+      SoundFX.playQuestComplete(profileRef.current.appearance.soundEffects);
+      triggerSystemConfetti();
+      setSystemEvent({
+        type: 'QUEST_COMPLETE',
+        quest: targetQuest,
+      });
+    }
   };
 
-  // Fail a quest (penalty triggered)
+  // Fail a quest (penalty triggered once)
   const failQuest = (questId: string) => {
-    const targetQuest = quests.find((q) => q.id === questId);
-    if (!targetQuest) return;
+    const targetQuest = questsRef.current.find((q) => q.id === questId);
+    if (!targetQuest || targetQuest.status === 'failed' || targetQuest.status === 'completed') return;
 
-    setQuests((prev) =>
-      prev.map((q) => (q.id === questId ? { ...q, status: 'failed' } : q))
-    );
+    questsRef.current = questsRef.current.map((q) => (q.id === questId ? { ...q, status: 'failed' } : q));
+    setQuests(questsRef.current);
 
     const deduction = targetQuest.penaltyXp || 50;
-    SoundFX.playPenalty(profile.appearance.soundEffects);
+    SoundFX.playPenalty(profileRef.current.appearance.soundEffects);
 
-    setProfile((prev) => ({
-      ...prev,
-      currentXp: Math.max(0, prev.currentXp - deduction),
-      totalXp: Math.max(0, prev.totalXp - deduction),
-    }));
+    profileRef.current = {
+      ...profileRef.current,
+      currentXp: Math.max(0, profileRef.current.currentXp - deduction),
+      totalXp: Math.max(0, profileRef.current.totalXp - deduction),
+    };
+    setProfile(profileRef.current);
 
     setSystemEvent({
       type: 'QUEST_FAILED',
@@ -353,44 +331,60 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
   };
 
-  // Boss victory handler
+  // Boss victory handler (awarded once only)
   const claimBossVictory = (questId: string) => {
-    const targetQuest = quests.find((q) => q.id === questId);
-    if (!targetQuest) return;
+    const targetQuest = questsRef.current.find((q) => q.id === questId);
+    if (!targetQuest || !targetQuest.isBoss) return;
+    if (targetQuest.status === 'completed' || targetQuest.status === 'failed') return;
 
-    setQuests((prev) =>
-      prev.map((q) =>
-        q.id === questId
-          ? {
-              ...q,
-              status: 'completed',
-              objectives: q.objectives.map((o) => ({ ...o, completed: true, current: o.target })),
-            }
-          : q
-      )
+    questsRef.current = questsRef.current.map((q) =>
+      q.id === questId
+        ? {
+            ...q,
+            status: 'completed',
+            objectives: q.objectives.map((o) => ({ ...o, completed: true, current: o.target })),
+          }
+        : q
+    );
+    setQuests(questsRef.current);
+
+    const gainedXp = targetQuest.xpReward;
+    const progression = calculateXpProgression(
+      profileRef.current.level,
+      profileRef.current.currentXp,
+      profileRef.current.xpToNextLevel,
+      profileRef.current.rank,
+      profileRef.current.unallocatedPoints,
+      profileRef.current.totalXp,
+      gainedXp
     );
 
-    setProfile((prev) => ({
-      ...prev,
-      currentXp: prev.currentXp + targetQuest.xpReward,
-      totalXp: prev.totalXp + targetQuest.xpReward,
+    profileRef.current = {
+      ...profileRef.current,
+      level: progression.level,
+      rank: progression.rank,
+      currentXp: progression.currentXp,
+      xpToNextLevel: progression.xpToNextLevel,
+      totalXp: progression.totalXp,
+      unallocatedPoints: progression.unallocatedPoints,
       attributes: {
-        ...prev.attributes,
-        VIT: prev.attributes.VIT + 10,
+        ...profileRef.current.attributes,
+        VIT: profileRef.current.attributes.VIT + 10,
       },
-      totalQuestsCompleted: prev.totalQuestsCompleted + 1,
-    }));
+      totalQuestsCompleted: profileRef.current.totalQuestsCompleted + 1,
+    };
+    setProfile(profileRef.current);
 
     // Unlock Shadow Sovereign achievement if present
-    setAchievements((prev) =>
-      prev.map((a) =>
-        a.id === 'ach-6'
-          ? { ...a, unlocked: true, unlockedDate: 'Today', progress: { current: 1, max: 1 } }
-          : a
-      )
+    const updatedAchievements = achievementsRef.current.map((a) =>
+      a.id === 'ach-6'
+        ? { ...a, unlocked: true, unlockedDate: 'Today', progress: { current: 1, max: 1 } }
+        : a
     );
+    achievementsRef.current = updatedAchievements;
+    setAchievements(updatedAchievements);
 
-    SoundFX.playBossVictory(profile.appearance.soundEffects);
+    SoundFX.playBossVictory(profileRef.current.appearance.soundEffects);
     triggerBossConfetti();
 
     setSystemEvent({
@@ -408,16 +402,17 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Allocate an attribute point from leveling up
   const allocateAttribute = (key: AttributeKey) => {
-    if (profile.unallocatedPoints <= 0) return;
-    SoundFX.playClick(profile.appearance.soundEffects);
-    setProfile((prev) => ({
-      ...prev,
-      unallocatedPoints: prev.unallocatedPoints - 1,
+    if (profileRef.current.unallocatedPoints <= 0) return;
+    SoundFX.playClick(profileRef.current.appearance.soundEffects);
+    profileRef.current = {
+      ...profileRef.current,
+      unallocatedPoints: profileRef.current.unallocatedPoints - 1,
       attributes: {
-        ...prev.attributes,
-        [key]: prev.attributes[key] + 1,
+        ...profileRef.current.attributes,
+        [key]: profileRef.current.attributes[key] + 1,
       },
-    }));
+    };
+    setProfile(profileRef.current);
   };
 
   const closeSystemEvent = () => {
@@ -510,81 +505,95 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       statRewards: questData.statRewards || { DISC: 1 },
     };
 
-    setQuests((prev) => [fullQuest, ...prev]);
-    SoundFX.playClick(profile.appearance.soundEffects);
+    questsRef.current = [fullQuest, ...questsRef.current];
+    setQuests(questsRef.current);
+    SoundFX.playClick(profileRef.current.appearance.soundEffects);
   };
 
   // Settings updates
   const updateGoals = (goals: string[]) => {
-    SoundFX.playToggle(profile.appearance.soundEffects);
-    setProfile((prev) => ({
-      ...prev,
+    SoundFX.playToggle(profileRef.current.appearance.soundEffects);
+    profileRef.current = {
+      ...profileRef.current,
       selectedGoals: goals,
-    }));
+    };
+    setProfile(profileRef.current);
   };
 
   const updatePreferences = (prefs: Partial<PlayerProfile['preferences']>) => {
-    SoundFX.playToggle(profile.appearance.soundEffects);
-    setProfile((prev) => ({
-      ...prev,
+    SoundFX.playToggle(profileRef.current.appearance.soundEffects);
+    profileRef.current = {
+      ...profileRef.current,
       preferences: {
-        ...prev.preferences,
+        ...profileRef.current.preferences,
         ...prefs,
       },
-    }));
+    };
+    setProfile(profileRef.current);
   };
 
   const updateNotifications = (notifs: Partial<PlayerProfile['notifications']>) => {
-    SoundFX.playToggle(profile.appearance.soundEffects);
-    setProfile((prev) => ({
-      ...prev,
+    SoundFX.playToggle(profileRef.current.appearance.soundEffects);
+    profileRef.current = {
+      ...profileRef.current,
       notifications: {
-        ...prev.notifications,
+        ...profileRef.current.notifications,
         ...notifs,
       },
-    }));
+    };
+    setProfile(profileRef.current);
   };
 
   const updateAppearance = (app: Partial<PlayerProfile['appearance']>) => {
-    SoundFX.playToggle(profile.appearance.soundEffects);
-    setProfile((prev) => ({
-      ...prev,
+    SoundFX.playToggle(profileRef.current.appearance.soundEffects);
+    profileRef.current = {
+      ...profileRef.current,
       appearance: {
-        ...prev.appearance,
+        ...profileRef.current.appearance,
         ...app,
       },
-    }));
+    };
+    setProfile(profileRef.current);
   };
 
   const updateProfileName = (name: string) => {
-    SoundFX.playClick(profile.appearance.soundEffects);
-    setProfile((prev) => ({
-      ...prev,
+    SoundFX.playClick(profileRef.current.appearance.soundEffects);
+    profileRef.current = {
+      ...profileRef.current,
       name: name.trim().toUpperCase() || 'OPERATOR',
-    }));
+    };
+    setProfile(profileRef.current);
   };
 
   // Reset to Level 1 / Fresh profile
   const resetProgress = () => {
     SoundFX.playPenalty(profile.appearance.soundEffects);
+    profileRef.current = FRESH_PLAYER_PROFILE;
     setProfile(FRESH_PLAYER_PROFILE);
-    setQuests(INITIAL_QUESTS.map((q) => ({
+    const freshQuests: Quest[] = INITIAL_QUESTS.map((q) => ({
       ...q,
       status: q.isBoss ? 'available' : 'active',
       objectives: q.objectives.map((o) => ({ ...o, completed: false, current: 0 })),
-    })));
-    setAchievements(INITIAL_ACHIEVEMENTS.map((a) => ({
+    }));
+    questsRef.current = freshQuests;
+    setQuests(freshQuests);
+    const freshAchievements = INITIAL_ACHIEVEMENTS.map((a) => ({
       ...a,
       unlocked: false,
       progress: a.progress ? { current: 0, max: a.progress.max } : undefined,
-    })));
+    }));
+    achievementsRef.current = freshAchievements;
+    setAchievements(freshAchievements);
     setCurrentTab('system');
     setSelectedQuestId(null);
   };
 
   // Reset to Level 17 active showcase profile
   const loadShowcaseState = () => {
-    SoundFX.playClick(profile.appearance.soundEffects);
+    SoundFX.playClick(profileRef.current.appearance.soundEffects);
+    profileRef.current = INITIAL_PLAYER_PROFILE;
+    questsRef.current = INITIAL_QUESTS;
+    achievementsRef.current = INITIAL_ACHIEVEMENTS;
     setProfile(INITIAL_PLAYER_PROFILE);
     setQuests(INITIAL_QUESTS);
     setAchievements(INITIAL_ACHIEVEMENTS);
@@ -599,7 +608,7 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   // Backup & Restore handlers
   const exportBackup = () => {
     try {
-      const { payload, warnings } = createBackupPayload(profile, quests, achievements);
+      const { payload, warnings } = createBackupPayload(profileRef.current, questsRef.current, achievementsRef.current);
       SoundFX.playClick(profile.appearance.soundEffects);
       return { success: true, data: payload, warnings };
     } catch (err) {
@@ -640,6 +649,9 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       localStorage.setItem(STORAGE_KEYS.ACHIEVEMENTS, achievementsStr);
 
       // 4. Update React Context state immediately
+      profileRef.current = validData.profile;
+      questsRef.current = validData.quests;
+      achievementsRef.current = validData.achievements;
       setProfile(validData.profile);
       setQuests(validData.quests);
       setAchievements(validData.achievements);
@@ -691,7 +703,7 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const activeDomains = data.paths.map((p) => p.toUpperCase() as any);
 
-    setProfile({
+    const newProfile: PlayerProfile = {
       ...FRESH_PLAYER_PROFILE,
       name: data.name.trim().toUpperCase() || 'OPERATOR',
       operatorId: `#${Math.floor(1000 + Math.random() * 9000)}-${data.name.slice(0, 3).toUpperCase()}`,
@@ -704,7 +716,9 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         dailyCommitment: data.timeCommitment,
       },
       hasCompletedOnboarding: true,
-    });
+    };
+    profileRef.current = newProfile;
+    setProfile(newProfile);
     setCurrentTab('system');
   };
 
