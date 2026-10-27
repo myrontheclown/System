@@ -105,6 +105,10 @@ export interface PlayerProfile {
     reducedAnimations: boolean;
   };
   hasCompletedOnboarding: boolean;
+  lastQuestDayKey?: string;
+  lastQuestRolloverAt?: number;
+  lastPenaltyProcessedAt?: number;
+  processedMissedPenaltyDayKeys?: string[];
 }
 
 export type NavigationTab = 'system' | 'quests' | 'stats' | 'profile';

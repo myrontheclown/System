@@ -155,6 +155,7 @@ export function validateBackup(raw: unknown): ValidationResult {
     preferences: {
       ...FRESH_PLAYER_PROFILE.preferences,
       ...((profile.preferences as PlayerProfile['preferences']) || {}),
+      dailyResetTime: (profile.preferences as any)?.dailyResetTime || (FRESH_PLAYER_PROFILE.preferences?.dailyResetTime) || '04:00 AM',
     },
     notifications: {
       ...FRESH_PLAYER_PROFILE.notifications,

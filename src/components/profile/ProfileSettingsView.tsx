@@ -135,8 +135,9 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
 
   const cycleResetTime = () => {
     const times = ['04:00 AM', '05:00 AM', '06:00 AM', '12:00 AM'];
-    const currentIdx = times.indexOf(profile.preferences.dailyResetTime);
-    const nextTime = times[(currentIdx + 1) % times.length];
+    const currentTime = profile.preferences?.dailyResetTime || '04:00 AM';
+    const currentIdx = times.indexOf(currentTime);
+    const nextTime = currentIdx === -1 ? '04:00 AM' : times[(currentIdx + 1) % times.length];
     updatePreferences({ dailyResetTime: nextTime });
     showToast(`Cycle reset scheduled for ${nextTime}`);
   };
@@ -570,7 +571,7 @@ export const ProfileSettingsView: React.FC<{ onRestartOnboarding: () => void }> 
             </div>
             <div className="flex items-center gap-1.5 bg-[#0D0E14] border border-[#29233A] px-3 py-1.5 rounded-lg text-[#4D8DFF] group-hover:text-white transition-colors">
               <span className="text-xs font-mono font-bold">
-                {profile.preferences.dailyResetTime}
+                {profile.preferences?.dailyResetTime || '04:00 AM'}
               </span>
               <Clock className="w-3.5 h-3.5" />
             </div>

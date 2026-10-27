@@ -29,6 +29,8 @@ import {
   createBackupPayload,
   validateBackup,
 } from '../utils/backup';
+import { reconcileDailyRollover } from '../utils/dailyRollover';
+import { getQuestDayKey } from '../utils/questSchedule';
 
 export { STORAGE_KEYS };
 
@@ -91,7 +93,26 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [profile, setProfile] = useState<PlayerProfile>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PROFILE);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Ensure backward compatibility for missing reset time
+        return {
+          ...INITIAL_PLAYER_PROFILE,
+          ...parsed,
+          preferences: {
+            ...INITIAL_PLAYER_PROFILE.preferences,
+            ...(parsed.preferences || {}),
+          },
+          notifications: {
+            ...INITIAL_PLAYER_PROFILE.notifications,
+            ...(parsed.notifications || {}),
+          },
+          appearance: {
+            ...INITIAL_PLAYER_PROFILE.appearance,
+            ...(parsed.appearance || {}),
+          },
+        };
+      }
     } catch (e) {
       console.error('Error loading profile from storage', e);
     }
@@ -124,6 +145,48 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   questsRef.current = quests;
   const achievementsRef = useRef(achievements);
   achievementsRef.current = achievements;
+
+  // Run daily rollover/reconciliation on mount and when becoming visible
+  useEffect(() => {
+    try {
+      const result = reconcileDailyRollover(profileRef.current, questsRef.current, new Date());
+      if (result.profile !== profileRef.current || JSON.stringify(result.quests) !== JSON.stringify(questsRef.current)) {
+        profileRef.current = result.profile;
+        questsRef.current = result.quests;
+        setProfile(result.profile);
+        setQuests(result.quests);
+      } else if (!profileRef.current.lastQuestDayKey) {
+        const resetTime = result.profile.preferences?.dailyResetTime || '04:00 AM';
+        profileRef.current = { ...profileRef.current, lastQuestDayKey: getQuestDayKey(new Date(), resetTime) };
+        setProfile(profileRef.current);
+      }
+    } catch (e) {
+      console.error('Error during daily rollover reconciliation', e);
+    }
+
+    const handleVisibility = () => {
+      try {
+        if (document.visibilityState === 'visible') {
+          const result = reconcileDailyRollover(profileRef.current, questsRef.current, new Date());
+          if (result.profile !== profileRef.current || JSON.stringify(result.quests) !== JSON.stringify(questsRef.current)) {
+            profileRef.current = result.profile;
+            questsRef.current = result.quests;
+            setProfile(result.profile);
+            setQuests(result.quests);
+          }
+        }
+      } catch (e) {
+        console.error('Error during visibility rollover reconciliation', e);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [currentTab, setCurrentTab] = useState<NavigationTab>('system');
   const [selectedQuestId, setSelectedQuestId] = useState<string | null>(null);
@@ -525,7 +588,13 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     profileRef.current = {
       ...profileRef.current,
       preferences: {
-        ...profileRef.current.preferences,
+        ...(profileRef.current.preferences || {
+          difficulty: 'Normal',
+          dailyQuota: 5,
+          activeDomains: ['BODY', 'MIND'],
+          dailyResetTime: '04:00 AM',
+          dailyCommitment: '30–60 min',
+        }),
         ...prefs,
       },
     };
@@ -639,8 +708,17 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
 
     try {
+      // Ensure backward compatibility for reset time
+      const restoredProfile = {
+        ...validData.profile,
+        preferences: {
+          ...(validData.profile.preferences || {}),
+          dailyResetTime: validData.profile.preferences?.dailyResetTime || '04:00 AM',
+        },
+      };
+
       // 3. Serialize and write to localStorage
-      const profileStr = JSON.stringify(validData.profile);
+      const profileStr = JSON.stringify(restoredProfile);
       const questsStr = JSON.stringify(validData.quests);
       const achievementsStr = JSON.stringify(validData.achievements);
 
@@ -649,10 +727,10 @@ export const SystemProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       localStorage.setItem(STORAGE_KEYS.ACHIEVEMENTS, achievementsStr);
 
       // 4. Update React Context state immediately
-      profileRef.current = validData.profile;
+      profileRef.current = restoredProfile;
       questsRef.current = validData.quests;
       achievementsRef.current = validData.achievements;
-      setProfile(validData.profile);
+      setProfile(restoredProfile);
       setQuests(validData.quests);
       setAchievements(validData.achievements);
       setSelectedQuestId(null);
